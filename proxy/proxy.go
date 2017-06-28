@@ -150,6 +150,10 @@ func (get *Get) DownloadInParallel(url string) error {
 			return err
 		}
 		log.Printf("Wrote %d bytes.\n", n)
+		err = os.Remove(get.FileName + "." + strconv.Itoa(i))
+		if err != nil {
+			log.Fatal(err)
+		}
 	}
 
 	return nil

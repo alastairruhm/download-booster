@@ -30,6 +30,7 @@ type Get struct {
 	WG              sync.WaitGroup
 }
 
+// GetFileName parse file name from url given
 func GetFileName(url string) string {
 	routeSlice := strings.Split(url, "/")
 	fileName := routeSlice[len(routeSlice)-1]

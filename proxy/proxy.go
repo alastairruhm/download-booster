@@ -10,6 +10,10 @@ import (
 
 	"strings"
 
+	"log"
+
+	"os"
+
 	"github.com/parnurzeal/gorequest"
 )
 
@@ -75,7 +79,7 @@ func (get *Get) DownloadInParallel(url string) error {
 	if !get.HeadRequestDone {
 		_, err := get.CheckAcceptRangeSupport(url)
 		if err != nil {
-			return nil
+			return err
 		}
 	}
 
@@ -83,7 +87,8 @@ func (get *Get) DownloadInParallel(url string) error {
 	limit := len(proxyList)                                    // 10 Go-routines for the process so each downloads 18.7MB
 	lenSub := length / limit                                   // Bytes for each Go-routine
 	diff := length % limit                                     // Get the remaining for the last request
-	// body := make([]string, 11)                                 // Make up a temporary array to hold the data to be written to the file
+	// tempFiles := make([]string, limit)
+	// var tempFiles []string
 	for i := 0; i < limit; i++ {
 		get.WG.Add(1)
 
@@ -111,11 +116,41 @@ func (get *Get) DownloadInParallel(url string) error {
 			// body[i] = string(reader)
 
 			tempFileSegName := get.FileName + "." + strconv.Itoa(i)
-			ioutil.WriteFile(tempFileSegName, bodyBytes, 0x777) // Write to the file i as a byte array
+			// tempFiles = append(tempFiles, tempFileSegName)
+			ioutil.WriteFile(tempFileSegName, bodyBytes, 0644) // Write to the file i as a byte array
 			get.WG.Done()
-			// ioutil.WriteFile("new_oct.png", []byte(string(body)), 0x777)
 		}(min, max, i)
 	}
 	get.WG.Wait()
+
+	targetFile, err := os.OpenFile(
+		get.FileName,
+		os.O_CREATE|os.O_APPEND|os.O_WRONLY,
+		0644,
+	)
+	if err != nil {
+		log.Fatal(err)
+		return err
+	}
+	defer targetFile.Close()
+
+	// merge segment files into one
+	for i := 0; i < limit; i++ {
+
+		data, err := ioutil.ReadFile(get.FileName + "." + strconv.Itoa(i))
+		log.Printf(get.FileName + "." + strconv.Itoa(i))
+		if err != nil {
+			log.Fatal(err)
+			return err
+		}
+
+		n, err := targetFile.Write(data)
+		if err != nil {
+			log.Fatal(err)
+			return err
+		}
+		log.Printf("Wrote %d bytes.\n", n)
+	}
+
 	return nil
 }

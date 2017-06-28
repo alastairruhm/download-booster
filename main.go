@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"os"
 
 	"github.com/alastairruhm/download-booster/proxy"
@@ -34,6 +35,7 @@ func main() {
 	app.Action = func(c *cli.Context) error {
 		err := get.DownloadInParallel(c.Args().First())
 		if err != nil {
+			log.Fatal(err)
 			return err
 		}
 		return nil

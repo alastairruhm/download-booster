@@ -5,16 +5,19 @@ import (
 	"io/ioutil"
 	"mime"
 	"net/http"
+	"net/url"
 	"strconv"
 	"sync"
+	"time"
+
+	pb "gopkg.in/cheggaaa/pb.v1"
 
 	"strings"
 
 	"log"
 
+	"io"
 	"os"
-
-	"github.com/parnurzeal/gorequest"
 )
 
 // Get is getter with metadata
@@ -46,30 +49,29 @@ func (get *Get) CheckAcceptRangeSupport(url string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	fmt.Printf("%+v", res)
 	if res.StatusCode == 301 || res.StatusCode == 302 {
 		finalURL := res.Request.URL.String()
-		fmt.Printf("The URL you ended up at is: %v\n", finalURL)
+		log.Printf("The URL you ended up at is: %v\n", finalURL)
 	}
 	get.FileName = GetFileName(url)
 
 	get.Header = res.Header
 	get.ContentLength = int(res.ContentLength)
 	get.MediaType, get.MediaParams, _ = mime.ParseMediaType(res.Header.Get("Content-Disposition"))
-	fmt.Printf("Get %s MediaType:%s, Filename:%s, Length %d.\n", get.Url, get.MediaType, get.MediaParams["filename"], get.ContentLength)
+
 	if get.MediaParams["filename"] != "" {
 		get.FileName = get.MediaParams["filename"]
 	}
 	get.HeadRequestDone = true
 	if get.Header.Get("Accept-Ranges") != "" {
-		fmt.Printf("Server %s support Range by %s.\n", get.Header.Get("Server"), get.Header.Get("Accept-Ranges"))
+		log.Printf("Server %s support Range by %s.\n", get.Header.Get("Server"), get.Header.Get("Accept-Ranges"))
 		return true, nil
 	}
-	fmt.Printf("Server %s doesn't support Range.\n", get.Header.Get("Server"))
+	log.Printf("Server %s doesn't support Range.\n", get.Header.Get("Server"))
 	return false, nil
 }
 
-func (get *Get) DownloadInParallel(url string) error {
+func (get *Get) DownloadInParallel(resourceUrl string) error {
 	proxyList := [...]string{
 		"http://10.34.50.246:1080",
 		"http://10.34.50.247:1080",
@@ -78,7 +80,7 @@ func (get *Get) DownloadInParallel(url string) error {
 	}
 
 	if !get.HeadRequestDone {
-		_, err := get.CheckAcceptRangeSupport(url)
+		_, err := get.CheckAcceptRangeSupport(resourceUrl)
 		if err != nil {
 			return err
 		}
@@ -88,8 +90,10 @@ func (get *Get) DownloadInParallel(url string) error {
 	limit := len(proxyList)                                    // 10 Go-routines for the process so each downloads 18.7MB
 	lenSub := length / limit                                   // Bytes for each Go-routine
 	diff := length % limit                                     // Get the remaining for the last request
-	// tempFiles := make([]string, limit)
-	// var tempFiles []string
+	pbs := make([]*pb.ProgressBar, limit)
+	filePaths := make([]string, limit)
+	totals := make([]int64, limit)
+
 	for i := 0; i < limit; i++ {
 		get.WG.Add(1)
 
@@ -100,30 +104,41 @@ func (get *Get) DownloadInParallel(url string) error {
 			max += diff // Add the remaining bytes in the last request
 		}
 
-		go func(min int, max int, i int) {
-			// client := &http.Client{}
-			// 在此处分配代理池
-			// req, _ := http.NewRequest("GET", get.Url, nil)
-			req := gorequest.New().Proxy(proxyList[i])
-			rangeHeader := "bytes=" + strconv.Itoa(min) + "-" + strconv.Itoa(max-1) // Add the data for the Range header of the form "bytes=0-100"
-			// req.Header.Add("Range", rangeHeader)
-			// resp, _ := client.Do(req)
-			_, bodyBytes, _ := req.Get(get.Url).
-				Set("Range", rangeHeader).
-				EndBytes()
-			// defer resp.Body.Close()
-
-			// reader, _ := ioutil.ReadAll(resp.Body)
-			// body[i] = string(reader)
-
-			tempFileSegName := get.FileName + "." + strconv.Itoa(i)
-			// tempFiles = append(tempFiles, tempFileSegName)
-			ioutil.WriteFile(tempFileSegName, bodyBytes, 0644) // Write to the file i as a byte array
-			get.WG.Done()
-		}(min, max, i)
+		proxyURL := proxyList[i]
+		rangeHeader := "bytes=" + strconv.Itoa(min) + "-" + strconv.Itoa(max-1) // Add the data for the Range header of the form "bytes=0-100"
+		tempFileSegName := get.FileName + "." + strconv.Itoa(i)
+		// initialize progress bar
+		pbs[i] = pb.New(max - min).Prefix(tempFileSegName).SetWidth(160).SetUnits(pb.U_BYTES)
+		filePaths[i] = tempFileSegName
+		totals[i] = (int64)(max - min)
+		go get.downloadSlice(proxyURL, rangeHeader, tempFileSegName)
 	}
-	get.WG.Wait()
 
+	pool, err := pb.StartPool(pbs...)
+	if err != nil {
+		log.Fatal(err)
+		return err
+	}
+	// update bars
+	wg := new(sync.WaitGroup)
+	for index, bar := range pbs {
+		wg.Add(1)
+
+		go func(cb *pb.ProgressBar, index int) {
+			showProgress(cb, filePaths[index], totals[index])
+			cb.Finish()
+			wg.Done()
+		}(bar, index)
+
+	}
+
+	// wait download goroutine task over
+	get.WG.Wait()
+	wg.Wait()
+	// close pool
+	pool.Stop()
+
+	// assemble slice data
 	targetFile, err := os.OpenFile(
 		get.FileName,
 		os.O_CREATE|os.O_APPEND|os.O_WRONLY,
@@ -139,23 +154,78 @@ func (get *Get) DownloadInParallel(url string) error {
 	for i := 0; i < limit; i++ {
 
 		data, err := ioutil.ReadFile(get.FileName + "." + strconv.Itoa(i))
-		log.Printf(get.FileName + "." + strconv.Itoa(i))
+
 		if err != nil {
 			log.Fatal(err)
 			return err
 		}
 
-		n, err := targetFile.Write(data)
+		_, err = targetFile.Write(data)
 		if err != nil {
 			log.Fatal(err)
 			return err
 		}
-		log.Printf("Wrote %d bytes.\n", n)
 		err = os.Remove(get.FileName + "." + strconv.Itoa(i))
 		if err != nil {
 			log.Fatal(err)
 		}
 	}
+	log.Println("download task over")
 
 	return nil
+}
+
+func showProgress(bar *pb.ProgressBar, filePath string, total int64) {
+
+	for {
+		file, err := os.OpenFile(
+			filePath,
+			os.O_CREATE|os.O_RDONLY,
+			0644,
+		)
+		if err != nil {
+
+			fmt.Printf("%+v\n", err)
+			log.Fatal(err)
+		}
+		defer file.Close()
+
+		fi, err := file.Stat()
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		size := fi.Size()
+		bar.Set64(size)
+		if size == total {
+			break
+		}
+
+		time.Sleep(time.Millisecond * 200)
+	}
+}
+
+func (get *Get) downloadSlice(proxyURL string, rangeHeader string, tempFileSegName string) {
+	defer get.WG.Done()
+	httpProxyURL, err := url.Parse(proxyURL)
+	if err != nil {
+		log.Fatal("Error parsing Tor proxy URL:", httpProxyURL, ".", err)
+	}
+	transport := &http.Transport{Proxy: http.ProxyURL(httpProxyURL)}
+	client := &http.Client{Transport: transport}
+	req, err := http.NewRequest("GET", get.Url, nil)
+	req.Header.Add("Range", rangeHeader)
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer resp.Body.Close()
+	tempFile, err := os.OpenFile(
+		tempFileSegName,
+		os.O_CREATE|os.O_APPEND|os.O_WRONLY,
+		0644,
+	)
+	defer tempFile.Close()
+	_, err = io.Copy(tempFile, resp.Body)
+	// log.Printf("downlaod %s over", tempFileSegName)
 }

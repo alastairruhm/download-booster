@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"log"
 	"os"
 
@@ -25,10 +24,10 @@ func main() {
 			return err
 		}
 		if supportRange == false {
-			fmt.Printf("Server %s doesn't support Range.\n", get.Header.Get("Server"))
+			// log.Printf("Server %s doesn't support Range.\n", get.Header.Get("Server"))
 			os.Exit(-1)
 		}
-		fmt.Printf("Server %s support Range by %s.\n", get.Header.Get("Server"), get.Header.Get("Accept-Ranges"))
+		// fmt.Printf("Server %s support Range by %s.\n", get.Header.Get("Server"), get.Header.Get("Accept-Ranges"))
 		return nil
 	}
 
